@@ -23,7 +23,7 @@ public struct MathpixReaderView: View {
     @State private var errorMessage: String?
     @State private var securityScopedSelection: URL?
     @State private var documentURL: URL?
-    @State private var documentBaseURL = Bundle.main.bundleURL
+    @State private var documentBaseURL = MathpixWebPage.bundledBaseURL
     @State private var source = Self.demoDocument
     @State private var savedSource = Self.demoDocument
 
@@ -163,12 +163,12 @@ public struct MathpixReaderView: View {
                 errorMessage = error.localizedDescription
             }
         }
-        .task(id: source) {
+        .task(id: PreviewIdentity(source: source, baseURL: documentBaseURL)) {
             // Dictation arrives as ordinary TextEditor changes. A short delay
             // coalesces words and punctuation before rebuilding the preview.
             try? await Task.sleep(for: .milliseconds(700))
             guard !Task.isCancelled else { return }
-            render(source: source, baseURL: documentBaseURL)
+            await render(source: source, baseURL: documentBaseURL)
         }
     }
 
@@ -232,7 +232,7 @@ public struct MathpixReaderView: View {
         releaseSecurityScope()
         documentURL = nil
         documentName = "Book-Dictation-Draft"
-        documentBaseURL = Bundle.main.bundleURL
+        documentBaseURL = MathpixWebPage.bundledBaseURL
         webPage.resources.setPackageRoot(nil)
         source = Self.dictationTemplate
         savedSource = ""
@@ -274,17 +274,13 @@ public struct MathpixReaderView: View {
         securityScopedSelection = nil
     }
 
-    private func render(source: String, baseURL: URL) {
+    private func render(source: String, baseURL: URL) async {
         do {
             let html = try MathpixHTML.document(source: source)
-            Task {
-                do {
-                    for try await _ in webPage.page.load(html: html, baseURL: baseURL) {}
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
-            }
+            errorMessage = nil
+            for try await _ in webPage.page.load(html: html, baseURL: baseURL) {}
         } catch {
+            guard !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -353,6 +349,14 @@ public struct MathpixReaderView: View {
     """#
 }
 
+/// A document can keep the same text while changing package roots. Include
+/// both in SwiftUI's task identity so the preview is rebuilt exactly once for
+/// the selected document and old navigations are cancelled with their task.
+private struct PreviewIdentity: Hashable {
+    let source: String
+    let baseURL: URL
+}
+
 private struct MMDFileDocument: FileDocument {
     static let readableContentTypes: [UTType] = [.mathpixMarkdown, .plainText]
 
@@ -382,13 +386,16 @@ private struct MMDFileDocument: FileDocument {
 /// and the local resource handler registered in that page's configuration.
 @MainActor
 private final class MathpixWebPage {
+    static let bundledBaseURL = URL(string: "mmd-resource://bundled/")!
     static let packageBaseURL = URL(string: "mmd-resource://package/")!
 
     let resources: MathpixPackageSchemeHandler
     let page: WebPage
 
     init() {
-        let resources = MathpixPackageSchemeHandler()
+        let resources = MathpixPackageSchemeHandler(
+            bundledRoot: Bundle.module.resourceURL!
+        )
         var configuration = WebPage.Configuration()
         configuration.urlSchemeHandlers[URLScheme("mmd-resource")!] = resources
         self.resources = resources
@@ -403,7 +410,12 @@ private final class MathpixPackageSchemeHandler: URLSchemeHandler {
     typealias TaskSequence = AsyncThrowingStream<URLSchemeTaskResult, any Error>
 
     private let lock = NSLock()
+    private let bundledRoot: URL
     private var packageRoot: URL?
+
+    init(bundledRoot: URL) {
+        self.bundledRoot = bundledRoot.standardizedFileURL
+    }
 
     func setPackageRoot(_ url: URL?) {
         lock.withLock { packageRoot = url?.standardizedFileURL }
@@ -413,9 +425,17 @@ private final class MathpixPackageSchemeHandler: URLSchemeHandler {
         guard let requestURL = request.url else {
             return failedSequence(PackageResourceError.invalidRequest)
         }
-        let root = lock.withLock { packageRoot }
-        guard let root else {
-            return failedSequence(PackageResourceError.noPackageSelected)
+        let root: URL
+        switch requestURL.host {
+        case "bundled":
+            root = bundledRoot
+        case "package":
+            guard let selectedRoot = lock.withLock({ packageRoot }) else {
+                return failedSequence(PackageResourceError.noPackageSelected)
+            }
+            root = selectedRoot
+        default:
+            return failedSequence(PackageResourceError.invalidRequest)
         }
 
         let relativePath = requestURL.path
@@ -520,19 +540,6 @@ private enum PackageResourceError: Error {
 
 private enum MathpixHTML {
     static func document(source: String) throws -> String {
-        guard let rendererURL = Bundle.module.url(
-            forResource: "mathpix-markdown-it",
-            withExtension: "js"
-        ) else {
-            throw ReaderError.missingRenderer
-        }
-
-        let renderer = try String(contentsOf: rendererURL, encoding: .utf8)
-            .replacingOccurrences(
-                of: "</script",
-                with: "<\\/script",
-                options: .caseInsensitive
-            )
         let sourceData = try JSONEncoder().encode(source)
         guard var sourceLiteral = String(data: sourceData, encoding: .utf8) else {
             throw ReaderError.couldNotEncodeDocument
@@ -608,9 +615,7 @@ private enum MathpixHTML {
               body { padding: 24px 22px 60px; }
             }
           </style>
-          <script>
-          \#(renderer)
-          </script>
+          <script src="mmd-resource://bundled/mathpix-markdown-it.js"></script>
         </head>
         <body>
           <div id="render-error"></div>
@@ -645,7 +650,6 @@ private enum MathpixHTML {
 }
 
 private enum ReaderError: LocalizedError {
-    case missingRenderer
     case couldNotDecodeDocument
     case couldNotEncodeDocument
     case expectedOneDocument(found: Int)
@@ -653,8 +657,6 @@ private enum ReaderError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingRenderer:
-            "The bundled mathpix-markdown-it renderer is missing."
         case .couldNotDecodeDocument:
             "The selected document is not UTF-8 text."
         case .couldNotEncodeDocument:
