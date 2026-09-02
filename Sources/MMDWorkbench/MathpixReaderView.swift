@@ -19,6 +19,7 @@ public struct MathpixReaderView: View {
     @State private var isShowingFind = false
     @State private var isConfirmingNewDraft = false
     @State private var isConfirmingOpen = false
+    @State private var pendingExternalURL: URL?
     @State private var documentName = "Mathpix Markdown"
     @State private var errorMessage: String?
     @State private var securityScopedSelection: URL?
@@ -91,6 +92,7 @@ public struct MathpixReaderView: View {
                     if source == savedSource {
                         isChoosingPackage = true
                     } else {
+                        pendingExternalURL = nil
                         isConfirmingOpen = true
                     }
                 }
@@ -146,9 +148,16 @@ public struct MathpixReaderView: View {
             isPresented: $isConfirmingOpen
         ) {
             Button("Discard Changes", role: .destructive) {
-                isChoosingPackage = true
+                if let pendingExternalURL {
+                    self.pendingExternalURL = nil
+                    open(selectionURL: pendingExternalURL)
+                } else {
+                    isChoosingPackage = true
+                }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                pendingExternalURL = nil
+            }
         }
         .fileImporter(
             isPresented: $isChoosingPackage,
@@ -169,6 +178,14 @@ public struct MathpixReaderView: View {
             try? await Task.sleep(for: .milliseconds(700))
             guard !Task.isCancelled else { return }
             await render(source: source, baseURL: documentBaseURL)
+        }
+        .onOpenURL { url in
+            if source == savedSource {
+                open(selectionURL: url)
+            } else {
+                pendingExternalURL = url
+                isConfirmingOpen = true
+            }
         }
     }
 
@@ -671,7 +688,10 @@ private enum ReaderError: LocalizedError {
 
 private extension UTType {
     /// Mathpix does not currently publish a system UTI, so use the extension's
-    /// dynamic type when available and retain a stable imported-type fallback.
+    /// dynamic type when available and retain an app-owned exported fallback.
     static let mathpixMarkdown = UTType(filenameExtension: "mmd")
-        ?? UTType(importedAs: "com.mathpix.markdown", conformingTo: .plainText)
+        ?? UTType(
+            exportedAs: "com.sinankarasu.mathpix-markdown",
+            conformingTo: .plainText
+        )
 }
