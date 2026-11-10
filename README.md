@@ -32,3 +32,11 @@ On iPadOS, select the enclosing Mathpix export folder when the document has an
 `images/` directory. Selecting only the `.mmd` can grant the app access to that
 single file while withholding its siblings. The resource handler coordinates
 reads with File Provider and waits for iCloud placeholders to download.
+
+
+## License
+
+MMDWorkbench's Swift source is available under the [MIT License](LICENSE).
+The bundled renderer and its dependencies retain their own licenses. See
+[Mathpix's license](Sources/MMDWorkbench/Resources/mathpix-markdown-it.LICENSE.txt)
+and the [bundled dependency notices](Sources/MMDWorkbench/Resources/mathpix-markdown-it.THIRD-PARTY-NOTICES.txt).
