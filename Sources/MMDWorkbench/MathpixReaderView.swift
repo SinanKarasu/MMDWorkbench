@@ -28,7 +28,15 @@ public struct MathpixReaderView: View {
     @State private var source = Self.demoDocument
     @State private var savedSource = Self.demoDocument
 
-    public init() {}
+    private let exampleURLs: [URL]
+
+    public init() {
+        self.init(exampleURLs: [])
+    }
+
+    public init(exampleURLs: [URL]) {
+        self.exampleURLs = exampleURLs
+    }
 
     public var body: some View {
         HStack(spacing: 0) {
@@ -94,6 +102,16 @@ public struct MathpixReaderView: View {
                     } else {
                         pendingExternalURL = nil
                         isConfirmingOpen = true
+                    }
+                }
+
+                if !exampleURLs.isEmpty {
+                    Menu("Examples", systemImage: "books.vertical") {
+                        ForEach(exampleURLs, id: \.self) { url in
+                            Button(url.deletingPathExtension().lastPathComponent) {
+                                requestOpen(url)
+                            }
+                        }
                     }
                 }
 
@@ -179,13 +197,15 @@ public struct MathpixReaderView: View {
             guard !Task.isCancelled else { return }
             await render(source: source, baseURL: documentBaseURL)
         }
-        .onOpenURL { url in
-            if source == savedSource {
-                open(selectionURL: url)
-            } else {
-                pendingExternalURL = url
-                isConfirmingOpen = true
-            }
+        .onOpenURL { requestOpen($0) }
+    }
+
+    private func requestOpen(_ url: URL) {
+        if source == savedSource {
+            open(selectionURL: url)
+        } else {
+            pendingExternalURL = url
+            isConfirmingOpen = true
         }
     }
 
@@ -205,10 +225,11 @@ public struct MathpixReaderView: View {
 
         do {
             let values = try selectionURL.resourceValues(forKeys: [.isDirectoryKey])
+            let isExportFolder = values.isDirectory == true
             let documentURL: URL
             let packageURL: URL
 
-            if values.isDirectory == true {
+            if isExportFolder {
                 packageURL = selectionURL
                 let children = try FileManager.default.contentsOfDirectory(
                     at: packageURL,
@@ -234,8 +255,9 @@ public struct MathpixReaderView: View {
             let source = try String(contentsOf: documentURL, encoding: .utf8)
             // Mathpix commonly gives the `.mmd` a generated identifier, while
             // the enclosing export folder carries the human-readable title.
-            documentName = packageURL.lastPathComponent
-            self.documentURL = documentURL
+            documentName = isExportFolder ? packageURL.lastPathComponent : documentURL.lastPathComponent
+            // Save exports a writable copy when the source lives in the app bundle.
+            self.documentURL = exampleURLs.contains(documentURL) ? nil : documentURL
             documentBaseURL = MathpixWebPage.packageBaseURL
             webPage.resources.setPackageRoot(packageURL)
             self.source = source
@@ -598,6 +620,8 @@ private enum MathpixHTML {
               font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
               line-height: 1.48;
             }
+            /* Mathpix emits plain paragraphs as unclassed divs. */
+            #setText > div:not([class], [id]) + div:not([class], [id]) { margin-top: 0.75em; }
             a { color: var(--link); }
             hr, table, th, td { border-color: var(--rule) !important; }
             pre, code {
@@ -644,7 +668,7 @@ private enum MathpixHTML {
               window.loadMathJax(true, true, true);
               document.getElementById("document").innerHTML = window.render(source, {
                 htmlTags: false,
-                breaks: true,
+                breaks: false,
                 padding: 0,
                 width: Math.max(document.documentElement.clientWidth - 108, 640)
               });
