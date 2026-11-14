@@ -25,6 +25,7 @@ public struct MathpixReaderView: View {
     @State private var securityScopedSelection: URL?
     @State private var documentURL: URL?
     @State private var documentBaseURL = MathpixWebPage.bundledBaseURL
+    @State private var rendersSoftBreaksAsLineBreaks = true
     @State private var source = Self.demoDocument
     @State private var savedSource = Self.demoDocument
 
@@ -39,6 +40,11 @@ public struct MathpixReaderView: View {
     }
 
     public var body: some View {
+        let preview = PreviewIdentity(
+            source: source,
+            baseURL: documentBaseURL,
+            breaks: rendersSoftBreaksAsLineBreaks
+        )
         HStack(spacing: 0) {
             if isEditorVisible {
                 VStack(spacing: 0) {
@@ -179,7 +185,7 @@ public struct MathpixReaderView: View {
         }
         .fileImporter(
             isPresented: $isChoosingPackage,
-            allowedContentTypes: [.folder, .mathpixMarkdown],
+            allowedContentTypes: [.folder, .mathpixMarkdown, .markdown],
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -190,12 +196,12 @@ public struct MathpixReaderView: View {
                 errorMessage = error.localizedDescription
             }
         }
-        .task(id: PreviewIdentity(source: source, baseURL: documentBaseURL)) {
+        .task(id: preview) {
             // Dictation arrives as ordinary TextEditor changes. A short delay
             // coalesces words and punctuation before rebuilding the preview.
             try? await Task.sleep(for: .milliseconds(700))
             guard !Task.isCancelled else { return }
-            await render(source: source, baseURL: documentBaseURL)
+            await render(preview)
         }
         .onOpenURL { requestOpen($0) }
     }
@@ -209,7 +215,7 @@ public struct MathpixReaderView: View {
         }
     }
 
-    /// Opens either a Mathpix export folder or its `.mmd` document. Selecting
+    /// Opens a Mathpix export folder or a standalone Markdown document. Selecting
     /// the folder provides the strongest sandbox access to `./images/...`;
     /// direct document selection uses the document's parent as the image root.
     private func open(selectionURL: URL) {
@@ -245,7 +251,7 @@ public struct MathpixReaderView: View {
                 }
                 documentURL = foundDocument
             } else {
-                guard selectionURL.pathExtension.lowercased() == "mmd" else {
+                guard ["mmd", "md"].contains(selectionURL.pathExtension.lowercased()) else {
                     throw ReaderError.unsupportedSelection
                 }
                 documentURL = selectionURL
@@ -259,6 +265,7 @@ public struct MathpixReaderView: View {
             // Save exports a writable copy when the source lives in the app bundle.
             self.documentURL = exampleURLs.contains(documentURL) ? nil : documentURL
             documentBaseURL = MathpixWebPage.packageBaseURL
+            rendersSoftBreaksAsLineBreaks = documentURL.pathExtension.lowercased() == "mmd"
             webPage.resources.setPackageRoot(packageURL)
             self.source = source
             savedSource = source
@@ -272,6 +279,7 @@ public struct MathpixReaderView: View {
         documentURL = nil
         documentName = "Book-Dictation-Draft"
         documentBaseURL = MathpixWebPage.bundledBaseURL
+        rendersSoftBreaksAsLineBreaks = true
         webPage.resources.setPackageRoot(nil)
         source = Self.dictationTemplate
         savedSource = ""
@@ -304,6 +312,7 @@ public struct MathpixReaderView: View {
         let packageURL = url.deletingLastPathComponent()
         webPage.resources.setPackageRoot(packageURL)
         documentBaseURL = MathpixWebPage.packageBaseURL
+        rendersSoftBreaksAsLineBreaks = url.pathExtension.lowercased() == "mmd"
         savedSource = source
         errorMessage = nil
     }
@@ -313,11 +322,11 @@ public struct MathpixReaderView: View {
         securityScopedSelection = nil
     }
 
-    private func render(source: String, baseURL: URL) async {
+    private func render(_ preview: PreviewIdentity) async {
         do {
-            let html = try MathpixHTML.document(source: source)
+            let html = try MathpixHTML.document(source: preview.source, breaks: preview.breaks)
             errorMessage = nil
-            for try await _ in webPage.page.load(html: html, baseURL: baseURL) {}
+            for try await _ in webPage.page.load(html: html, baseURL: preview.baseURL) {}
         } catch {
             guard !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
@@ -388,12 +397,10 @@ public struct MathpixReaderView: View {
     """#
 }
 
-/// A document can keep the same text while changing package roots. Include
-/// both in SwiftUI's task identity so the preview is rebuilt exactly once for
-/// the selected document and old navigations are cancelled with their task.
 private struct PreviewIdentity: Hashable {
     let source: String
     let baseURL: URL
+    let breaks: Bool
 }
 
 private struct MMDFileDocument: FileDocument {
@@ -578,7 +585,7 @@ private enum PackageResourceError: Error {
 }
 
 private enum MathpixHTML {
-    static func document(source: String) throws -> String {
+    static func document(source: String, breaks: Bool) throws -> String {
         let sourceData = try JSONEncoder().encode(source)
         guard var sourceLiteral = String(data: sourceData, encoding: .utf8) else {
             throw ReaderError.couldNotEncodeDocument
@@ -668,7 +675,7 @@ private enum MathpixHTML {
               window.loadMathJax(true, true, true);
               document.getElementById("document").innerHTML = window.render(source, {
                 htmlTags: false,
-                breaks: false,
+                breaks: \#(breaks),
                 padding: 0,
                 width: Math.max(document.documentElement.clientWidth - 108, 640)
               });
@@ -705,12 +712,15 @@ private enum ReaderError: LocalizedError {
         case .expectedOneDocument(let count):
             "Expected one .mmd document in the selected folder; found \(count)."
         case .unsupportedSelection:
-            "Select a Mathpix .mmd document or its export folder."
+            "Select a Markdown (.md or .mmd) document or a Mathpix export folder."
         }
     }
 }
 
 private extension UTType {
+    static let markdown = UTType(filenameExtension: "md")
+        ?? UTType(importedAs: "net.daringfireball.markdown", conformingTo: .plainText)
+
     /// Mathpix does not currently publish a system UTI, so use the extension's
     /// dynamic type when available and retain an app-owned exported fallback.
     static let mathpixMarkdown = UTType(filenameExtension: "mmd")
